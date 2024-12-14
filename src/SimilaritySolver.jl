@@ -1,5 +1,6 @@
 module SimilaritySolver
 
-# Write your package code here.
+export findODE
+include("similaritySolve.jl")
 
 end
