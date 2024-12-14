@@ -1,0 +1,13 @@
+name = "SimilaritySolver"
+uuid = "33b50310-0bd7-4cef-819e-45414bb4d2ee"
+authors = ["Elvis Aguero"]
+version = "1.0.0-DEV"
+
+[compat]
+julia = "1.6.7"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
