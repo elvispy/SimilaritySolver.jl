@@ -1,6 +1,6 @@
 module SimilaritySolver
 
-export findODE
+export find_similarity
 include("similaritySolve.jl")
 
 end
