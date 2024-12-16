@@ -290,7 +290,8 @@ function find_ode(symbolicPDE::T; vars::Vector{T}=nothing, log::Bool=true) where
     end
 
     Logging.disable_logging(Logging.Debug)
-
+    results = unique(var -> (var["substitutions"][n], var["substitutions"][m]), results);
+    
     return results
 end
 
@@ -363,18 +364,29 @@ function parse_boundary_condition(condition)
         # Convert the restriction string into pairs (e.g., "x=0, t" => [(:x, 0), (:t, 0)])
         restriction = Dict{Union{Symbol, Num}, Union{Float64, Num, Nothing}}()
         input_vars = [];
+        parameters = [];
         for r in split(restriction_str, ",")
             var, val = strip.(split(r, "=")) ∪ [nothing]
             varNum = eval(Meta.parse("@variables $var"))[1]
-            restriction[varNum] = isnothing(val) ? val : parse(Float64, val)
             push!(input_vars, Symbolics.variable(var));
+            if isnothing(val); continue; end
+            
+            try
+                val =  parse(Float64, val)
+            catch err
+                if err isa ArgumentError
+                    val = Symbolics.variable(val);
+                    push!(parameters, val);
+                end
+            end
+            restriction[varNum] = val
         end
         eval(Meta.parse("@variables "*join(input_vars, " ")))
         function_value = eval(Meta.parse("@variables $(strip(match_result["function"]))($(join(input_vars, ", ")))"))[1];
         #function_value = Symbolics.variable(, T=Symbolics.FnType)(input_vars...);
         
         return [Dict("function" => function_value, "restriction" => restriction, 
-                       "value" => value),  input_vars]
+                       "value" => value),  input_vars, parameters]
     else
         throw(ArgumentError("Invalid boundary condition format: $condition"))
     end
@@ -444,7 +456,7 @@ input_vars = [:x, :y]
 output_vars = [:u]
 parse_pde(expr, input_vars, output_vars)
 """
-function parse_pde(expr::String, input_vars, output_vars)::Num
+function parse_pde(expr::String, input_vars, output_vars; parameters=[])::Num
     # Replace '=' with negative form to prepare the expression
     expr = replace(expr, r"=(.+)" => s"- ( \1 )")
     
@@ -458,8 +470,8 @@ function parse_pde(expr::String, input_vars, output_vars)::Num
     # Declare input and output variables
     eval(Meta.parse("@variables " * join(input_vars, " ")))
     eval(Meta.parse("@variables " * join(output_vars, " ")))
+    if length(parameters) > 0; eval(Meta.parse("@variables " * join(parameters, " "))); end
 
-    # Evaluate the final expression
     return eval(Meta.parse(expr))
 end
 
@@ -483,20 +495,21 @@ function boundary_condition_similarity!(results, restrictions; input_vars)
     return results
 end
 
-function find_similarity(pde::String, boundary_conditions::String)
-
+function find_similarity(pde::String, boundary_conditions::String; parameters = Vector{Num}[])
     # Split the boundary conditions by semicolons
     boundary_list = String.(split(boundary_conditions, ";"))
-
+    
     boundary_conditions = parse_boundary_condition.(boundary_list)
     input_vars = convert(Vector{Num}, union(map(var -> var[2], boundary_conditions)...));
+    if length(parameters) > 0; parameters = eval(Meta.parse("@variables " * join(parameters, " "))); end    
+    parameters = convert(Vector{Num}, union(parameters, map(var -> var[3], boundary_conditions)...));
     restrictions = map(var -> var[1], boundary_conditions);
     output_vars = convert(Vector{Num}, union(map(var -> var["function"], restrictions)...));
     #println(iszero(Differential(input_vars[1])(output_vars[1])))
     #output_vars_dict = Dict(map(var -> chop("$(var["function"])", tail=1) => var["function"], restrictions));
     
-    symbolicPDE = parse_pde(pde, input_vars, output_vars);
-    results = find_ode(symbolicPDE; vars=input_vars ∪ output_vars);
+    symbolicPDE = parse_pde(pde, input_vars, output_vars; parameters = parameters);
+    results = find_ode(symbolicPDE; vars=input_vars ∪ output_vars ∪ parameters);
     results = boundary_condition_similarity!(results, restrictions; input_vars=input_vars);
     # info = Dict("input_vars" => input_vars, 
     #            "output_vars" => output_vars, 
@@ -506,7 +519,7 @@ function find_similarity(pde::String, boundary_conditions::String)
 end
 
 # Test the function with an example
-#parsed_conditions = find_similarity("dw/dt = d2w/d2r", "w(r=Inf, t) = 0; w(r, t=0) = 1.0")
+#parsed_conditions = find_similarity("dw/dt = w * d2w/d2r", "w(r=Inf, t) = 0; w(r, t=0) = U0")
 #println(parsed_conditions)
 
 # @variables t r u(r, t)# η(x, y) f(η)
