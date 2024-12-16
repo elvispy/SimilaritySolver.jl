@@ -17,10 +17,11 @@ iszerosym(sym) = (simplify(sym; expand=true) != 0) === false
     restrictions = map(var -> var[1], boundary_conditions);
     output_vars = convert(Vector{Num}, union(map(var -> var["function"], restrictions)...));
     ss = @variables r, t w(r, t)
+    println(boundary_conditions)
     @test isequal(Set(input_vars))(Set(ss))
     @test isinf(boundary_conditions[1][1]["restriction"][r])
-    @test isnothing(boundary_conditions[1][1]["restriction"][t])
-    @test isnothing(boundary_conditions[2][1]["restriction"][r])
+    @test !haskey(boundary_conditions[1][1]["restriction"], t)
+    @test !haskey(boundary_conditions[2][1]["restriction"], r)
     @test iszero(boundary_conditions[2][1]["restriction"][t])
     @test isinf(boundary_conditions[1][1]["value"]) && boundary_conditions[1][1]["value"] < 0 
     @test boundary_conditions[2][1]["value"] ≈ 1.0
