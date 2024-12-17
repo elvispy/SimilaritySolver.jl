@@ -271,9 +271,9 @@ function find_ode(symbolicPDE::T; vars::Vector{T}=nothing, log::Bool=true) where
     for (η_exp, out_exp) = Iterators.product(η_exprs, output_expr)
         result = trySimilarity(out_exp, η_exp, symbolicPDE, η, inputs, outputs, [n, m]);
         if result["success"] == true
-            result["out_exp"] = outputs => out_exp
+            result["output_similarity"] = outputs => Symbolics.substitute(out_exp, result["substitutions"])
             result["similarity_variable"] = η => substitute(η_exp, result["substitutions"]);
-            result["value"] = Symbolics.diff2term(Symbolics.value(Symbolics.substitute(result["PDE"]/η^Symbolics.degree(result["PDE"], η), η => Symbolics.variable("η"))));
+            result["PDE_similarity"] = Symbolics.diff2term(Symbolics.value(Symbolics.substitute(result["PDE"]/η^Symbolics.degree(result["PDE"], η), η => Symbolics.variable("η"))));
 
             @info "Got similarity with f=$out_exp, η=$η_exp"
             push!(results, result)
@@ -481,7 +481,7 @@ function boundary_condition_similarity!(results, restrictions; input_vars)
             var = results[ii]
             x, y = input_vars; 
             @variables n::Float64 m::Float64 η($x, $y) f(η)
-            output_function = Symbolics.substitute(var["out_exp"][2], var["similarity_variable"]);
+            output_function = Symbolics.substitute(var["output_similarity"][2], var["similarity_variable"]);
             output_function = simplify(Symbolics.substitute(output_function, var["substitutions"]));
             BC_similarity = [];
             for restriction = restrictions
@@ -495,7 +495,7 @@ function boundary_condition_similarity!(results, restrictions; input_vars)
     return results
 end
 
-function find_similarity(pde::String, boundary_conditions::String; parameters = Vector{Num}[])
+function find_similarity(pde::String, boundary_conditions::String; parameters = Vector{Num}[], verbose=false)
     # Split the boundary conditions by semicolons
     boundary_list = String.(split(boundary_conditions, ";"))
     
@@ -515,11 +515,14 @@ function find_similarity(pde::String, boundary_conditions::String; parameters = 
     #            "output_vars" => output_vars, 
     #           "restrictions" => restrictions,
     #           "analysis_result" => results)
+    if verbose == false && length(results) > 0
+        return filter(p -> contains(p[1], "similarity"), results[1])
+    end
     return results
 end
 
 # Test the function with an example
-#parsed_conditions = find_similarity("dw/dt = w * d2w/d2r", "w(r=Inf, t) = 0; w(r, t=0) = U0")
+parsed_conditions = find_similarity("du/dt + 6 * u * du/dx + d3u/d3x = 0", "u(x=Inf, t) = 0")
 #println(parsed_conditions)
 
 # @variables t r u(r, t)# η(x, y) f(η)
