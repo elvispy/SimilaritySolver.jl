@@ -6,6 +6,20 @@ This Julia package provides a set of tools for symbolic manipulation and similar
 
 ---
 
+## 🧠 Motivation
+
+Similarity solutions are a powerful technique for reducing partial differential equations (PDEs) to ordinary differential equations (ODEs). This simplification often makes complex analytical or numerical problems more tractable. However, identifying appropriate transformations and substitutions is nontrivial.
+
+This package automates that process by:
+- Classifying symbolic variables as inputs or outputs
+- Substituting similarity variables
+- Applying heuristics to guess transformation powers
+- Verifying and simplifying the reduced equation
+
+This tool aims to accelerate mathematical modeling in physics, engineering, and applied mathematics.
+
+---
+
 ## 🚀 Features
 
 - **Automatic decomposition** of symbolic variables into inputs and outputs.
@@ -60,6 +74,40 @@ parse_pde("d2x/dy = x * y", [:x, :y], [:u])
 
 ---
 
+## 🔤 Notation and Syntax
+
+The core function `find_ode` and its wrapper `find_similarity` expect PDEs and boundary conditions in a symbolic or string-based format. Here’s how the notation works:
+
+### PDE Expression Syntax
+- Use `d<order><variable>` for partial derivatives.
+- Use `/` to indicate the variable of differentiation.
+- Use `=` to denote equality (internally rewritten as `- RHS`).
+
+Example:
+```julia
+"du/dt + 6 * u * du/dx + d3u/d3x = 0"
+```
+will be interpreted as:
+\[ \frac{\partial u}{\partial t} + 6u \frac{\partial u}{\partial x} + \frac{\partial^3 u}{\partial x^3} = 0 \]
+
+### Boundary Condition Syntax
+Boundary conditions must be passed as a semicolon-separated string of assignments:
+```julia
+"u(x=0, t) = 1.0; u(x=Inf, t) = 0"
+```
+Each condition defines the function, input restrictions, and its fixed value.
+
+### Variable Decomposition
+Variables are automatically split into:
+- **Inputs** (e.g. `x`, `y`) — variables others depend on
+- **Outputs** (e.g. `u(x,y)`) — variables defined as functions of inputs
+
+The code then attempts similarity substitutions of the form:
+\[ \eta = y x^m \quad \text{and} \quad u(x, y) = y^n f(\eta) \]
+and tries to find powers \( n, m \) that reduce the PDE.
+
+---
+
 ## 📖 API Overview
 
 ### `find_ode(symbolicPDE::Num; vars::Vector{Num})`
@@ -82,12 +130,6 @@ Splits symbolic variables into inputs and outputs.
 ## 🧪 Testing
 
 You can run the test examples at the bottom of the main file to validate the behavior. For full test coverage, consider structuring tests using `Test.jl` in a `test/` folder.
-
----
-
-## 🧠 Motivation
-
-Similarity solutions help reduce PDEs to ODEs, making complex problems more tractable. This symbolic toolchain is meant to facilitate experimentation with such reductions, automating variable classification and heuristic power substitution.
 
 ---
 
