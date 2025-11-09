@@ -4,6 +4,14 @@ using Logging
 
 const SymbolicType = Union{Num, SymbolicUtils.BasicSymbolic, Nothing}
 
+"""
+    iszerosym(sym)::Bool
+
+Return `true` when a symbolic expression simplifies to zero.
+The helper expands derivatives/products before calling `simplify`
+so that structurally different but algebraically equivalent forms
+collapse consistently throughout the solver pipeline.
+"""
 iszerosym(sym) = (simplify(sym; expand=true) != 0) === false
 
 """
@@ -183,6 +191,26 @@ function guess_powers(expression::T; indep_vars::Vector{T}, powers::Vector{T}, v
     return result
 end
 
+"""
+    trySimilarity(output_expr, η_expr, symbolicPDE, similarity_var, inputs, outputs, powers)
+
+Plug a candidate similarity ansatz into `symbolicPDE` and try to
+find exponents that collapse the PDE into an ODE.
+
+# Arguments
+- `output_expr`: Template for the dependent variable (e.g. `y^n * f(η)`).
+- `η_expr`: Candidate similarity variable in terms of the inputs.
+- `symbolicPDE`: Symbolic equation produced by `parse_pde`.
+- `similarity_var`: Symbolics variable representing `η`.
+- `inputs`: Independent variables identified by `decomposeVars`.
+- `outputs`: Dependent variables from the PDE.
+- `powers`: Symbols (usually `[n, m]`) whose values are scanned by `guess_powers`.
+
+# Returns
+A `Dict` with the same structure as the `guess_powers` result:
+`"success"`, `"PDE"`, and `"substitutions"`, enriched with logging
+information for debugging purposes.
+"""
 function trySimilarity(output_expr, η_expr, symbolicPDE, similarity_var, inputs, outputs, powers);
     x, y = inputs;
     η = similarity_var;
@@ -475,6 +503,22 @@ function parse_pde(expr::String, input_vars, output_vars; parameters=[])::Num
     return eval(Meta.parse(expr))
 end
 
+"""
+    boundary_condition_similarity!(results, restrictions; input_vars)
+
+Evaluate the discovered similarity solutions against the original
+boundary conditions and store the transformed constraints inside
+each result dictionary.
+
+# Arguments
+- `results`: Vector of similarity search results returned by `find_ode`.
+- `restrictions`: Parsed boundary-condition metadata produced by `parse_boundary_condition`.
+- `input_vars`: Independent variables used to build the similarity variable.
+
+# Returns
+The updated `results` vector, where every successful entry now
+contains a `"BC_similarity"` key with the transformed equalities.
+"""
 function boundary_condition_similarity!(results, restrictions; input_vars)
     if length(results) > 0
         for ii = eachindex(results)
@@ -495,24 +539,44 @@ function boundary_condition_similarity!(results, restrictions; input_vars)
     return results
 end
 
-function find_similarity(pde::String, boundary_conditions::String; parameters = Vector{Num}[], verbose=false)
+"""
+    find_similarity(pde::String, boundary_conditions::String; parameters=Vector{Num}[], verbose=false)
+
+Parse textual PDEs and boundary conditions, search for similarity
+reductions, and report the resulting transformations.
+
+# Arguments
+- `pde`: String describing the PDE in `parse_pde` format.
+- `boundary_conditions`: Semicolon-separated list of boundary condition strings.
+- `parameters`: Optional symbolic parameter names that should be treated as variables.
+- `verbose`: When `true`, return the full vector of search results; otherwise
+  return the first entry pruned to similarity-related keys.
+
+# Returns
+- A filtered `Dict` when a similarity solution is found and `verbose=false`.
+- The full vector of result dictionaries (possibly empty) when `verbose=true`
+  or when no solution is detected.
+"""
+function find_similarity(pde::String, boundary_conditions::String; parameters=Vector{Num}[], verbose=false)
     # Split the boundary conditions by semicolons
     boundary_list = String.(split(boundary_conditions, ";"))
-    
     boundary_conditions = parse_boundary_condition.(boundary_list)
-    input_vars = convert(Vector{Num}, union(map(var -> var[2], boundary_conditions)...));
-    if length(parameters) > 0; parameters = eval(Meta.parse("@variables " * join(parameters, " "))); end    
-    parameters = convert(Vector{Num}, union(parameters, map(var -> var[3], boundary_conditions)...));
-    restrictions = map(var -> var[1], boundary_conditions);
-    output_vars = convert(Vector{Num}, union(map(var -> var["function"], restrictions)...));
+
+    input_vars = convert(Vector{Num}, union(map(var -> var[2], boundary_conditions)...))
+    if length(parameters) > 0
+        parameters = eval(Meta.parse("@variables " * join(parameters, " ")))
+    end
+    parameters = convert(Vector{Num}, union(parameters, map(var -> var[3], boundary_conditions)...))
+    restrictions = map(var -> var[1], boundary_conditions)
+    output_vars = convert(Vector{Num}, union(map(var -> var["function"], restrictions)...))
     #println(iszero(Differential(input_vars[1])(output_vars[1])))
     #output_vars_dict = Dict(map(var -> chop("$(var["function"])", tail=1) => var["function"], restrictions));
-    
-    symbolicPDE = parse_pde(pde, input_vars, output_vars; parameters = parameters);
-    results = find_ode(symbolicPDE; vars=input_vars ∪ output_vars ∪ parameters);
-    results = boundary_condition_similarity!(results, restrictions; input_vars=input_vars);
-    # info = Dict("input_vars" => input_vars, 
-    #            "output_vars" => output_vars, 
+
+    symbolicPDE = parse_pde(pde, input_vars, output_vars; parameters=parameters)
+    results = find_ode(symbolicPDE; vars=input_vars ∪ output_vars ∪ parameters)
+    results = boundary_condition_similarity!(results, restrictions; input_vars=input_vars)
+    # info = Dict("input_vars" => input_vars,
+    #            "output_vars" => output_vars,
     #           "restrictions" => restrictions,
     #           "analysis_result" => results)
     if verbose == false && length(results) > 0
@@ -522,7 +586,8 @@ function find_similarity(pde::String, boundary_conditions::String; parameters = 
 end
 
 # Test the function with an example
-parsed_conditions = find_similarity("du/dt + 6 * u * du/dx + d3u/d3x = 0", "u(x=Inf, t) = 0")
+#parsed_conditions = find_similarity("dw/dt = w * d2w/d2r", "w(r=Inf, t) = 0; w(r, t=0) = U0")
+#parsed_conditions = find_similarity("du/dt + 6 * u * du/dx + d3u/d3x = 0", "u(x=Inf, t) = 0")
 #println(parsed_conditions)
 
 # @variables t r u(r, t)# η(x, y) f(η)
