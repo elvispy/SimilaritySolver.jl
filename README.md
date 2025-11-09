@@ -6,7 +6,7 @@ This Julia package provides a set of tools for symbolic manipulation and similar
 
 ---
 
-## 🧠 Motivation
+## Motivation
 
 Similarity solutions are a powerful technique for reducing partial differential equations (PDEs) to ordinary differential equations (ODEs). This simplification often makes complex analytical or numerical problems more tractable. However, identifying appropriate transformations and substitutions is nontrivial.
 
@@ -20,7 +20,7 @@ This tool aims to accelerate mathematical modeling in physics, engineering, and 
 
 ---
 
-## 🚀 Features
+## Features
 
 - **Automatic decomposition** of symbolic variables into inputs and outputs.
 - **Similarity transformation detection** for 2D PDEs.
@@ -32,7 +32,7 @@ This tool aims to accelerate mathematical modeling in physics, engineering, and 
 
 ## 📦 Installation
 
-Make sure you have Julia installed. Then clone this repository and instantiate dependencies:
+Make sure you have Julia installed. Then clone this repository and instantiate dependencies as such:
 
 ```bash
 julia --project=. -e 'using Pkg; Pkg.instantiate()'
@@ -56,7 +56,7 @@ result = find_similarity("du/dt + 6 * u * du/dx + d3u/d3x = 0", "u(x=Inf, t) = 0
 println(result)
 ```
 
-### Blasius Boundary Layer (from `test/test2.jl`)
+### Blasius Boundary Layer
 
 The classical flat-plate boundary layer satisfies
 
