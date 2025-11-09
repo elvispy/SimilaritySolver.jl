@@ -539,63 +539,110 @@ function boundary_condition_similarity!(results, restrictions; input_vars)
     return results
 end
 
+
 """
-    find_similarity(pde::String, boundary_conditions::String; parameters=Vector{Num}[], verbose=false)
+    find_similarity(pde::String, boundary_conditions::String; parameters=Symbolics.Num[], verbose=false)
 
-Parse textual PDEs and boundary conditions, search for similarity
-reductions, and report the resulting transformations.
+Reduce a PDE with boundary conditions to a similarity ODE.
 
-# Arguments
-- `pde`: String describing the PDE in `parse_pde` format.
-- `boundary_conditions`: Semicolon-separated list of boundary condition strings.
-- `parameters`: Optional symbolic parameter names that should be treated as variables.
-- `verbose`: When `true`, return the full vector of search results; otherwise
-  return the first entry pruned to similarity-related keys.
+Inputs
+- `pde`: PDE written in SimilaritySolver string syntax, e.g.
+    "dψ/dy * d2ψ/dxdy - dψ/dx * d2ψ/d2y - ν * d3ψ/d3y = 0"
+- `boundary_conditions`: semicolon-separated BCs, e.g.
+    "ψ(x, y=0)=0; dψ/dy(x, y=0)=0; dψ/dy(x, y=Inf)=U∞"
+- `parameters`: either
+    • a Vector of `Symbolics.Num` already defined (recommended), or
+    • a Vector of parameter names as `String`/`Symbol` to be created.
+  Any symbols that appear in the BCs are also added automatically.
+- `verbose`: if `true`, return the full analysis result; otherwise return a filtered summary.
 
-# Returns
-- A filtered `Dict` when a similarity solution is found and `verbose=false`.
-- The full vector of result dictionaries (possibly empty) when `verbose=true`
-  or when no solution is detected.
+Returns
+- If `verbose=false`: the first “similarity” entry from the analysis result.
+- If `verbose=true`: the full analysis object.
+
+Notes
+- This function assumes `parse_boundary_condition`, `parse_pde`, `find_ode`,
+  and `boundary_condition_similarity!` are available in scope (SimilaritySolver internals).
+- Avoid passing unicode names in `parameters` unless you also create them in the current module.
 """
-function find_similarity(pde::String, boundary_conditions::String; parameters=Vector{Num}[], verbose=false)
-    # Split the boundary conditions by semicolons
-    boundary_list = String.(split(boundary_conditions, ";"))
-    boundary_conditions = parse_boundary_condition.(boundary_list)
+function find_similarity(
+    pde::String,
+    boundary_conditions::String;
+    parameters::Vector{<:Union{Symbolics.Num, AbstractString, Symbol}} = Symbolics.Num[],
+    verbose::Bool = false
+)
 
-    input_vars = convert(Vector{Num}, union(map(var -> var[2], boundary_conditions)...))
-    if length(parameters) > 0
-        parameters = eval(Meta.parse("@variables " * join(parameters, " ")))
+    # 1) Parse and sanitize boundary conditions ---------------------------------
+    # Split on ';', strip whitespace, drop empty entries like trailing ';'
+    raw_bcs = split(boundary_conditions, ';')
+    bc_strings = [strip(s) for s in raw_bcs if !isempty(strip(s))]
+
+    # Parse each BC into the internal representation:
+    # Each item is expected to carry:
+    #   var[1] -> restriction dict (with key "function")
+    #   var[2] -> input variable(s) used in this BC
+    #   var[3] -> parameter(s) referenced in this BC
+    parsed_bcs = parse_boundary_condition.(bc_strings)
+
+    # 2) Collect input variables from BCs ----------------------------------------
+    # Union of all input variables referenced by the BCs
+    input_vars = convert(Vector{Symbolics.Num}, union(map(bc -> bc[2], parsed_bcs)...))
+
+    # 3) Normalize user-provided `parameters` ------------------------------------
+    # Accept:
+    #   - Vector{Num} (already-declared parameters)
+    #   - Vector{String}/Vector{Symbol} (create them now)
+    local user_params::Vector{Symbolics.Num} = Symbolics.Num[]
+
+    if !isempty(parameters)
+        # Separate already-symbolic from names that need creation
+        existing_nums = Symbolics.Num[x for x in parameters if x isa Symbolics.Num]
+
+        name_like = Symbol[x for x in parameters if x isa Symbol]  # symbols
+        append!(name_like, Symbol[x for x in parameters if x isa AbstractString]) # strings -> symbols
+
+        # Create symbolic parameters only if names were provided
+        new_nums = Symbolics.Num[]
+        if !isempty(name_like)
+            # Create variables programmatically:
+            # Safer than `eval(Meta.parse("@variables ..."))` on arbitrary input.
+            # Symbolics provides `@variables`, but macros need parsing.
+            # Use Symbolics.variables to construct variables from Symbols.
+            new_nums = Symbolics.variables(name_like...)
+        end
+
+        user_params = vcat(existing_nums, new_nums)
     end
-    parameters = convert(Vector{Num}, union(parameters, map(var -> var[3], boundary_conditions)...))
-    restrictions = map(var -> var[1], boundary_conditions)
-    output_vars = convert(Vector{Num}, union(map(var -> var["function"], restrictions)...))
-    #println(iszero(Differential(input_vars[1])(output_vars[1])))
-    #output_vars_dict = Dict(map(var -> chop("$(var["function"])", tail=1) => var["function"], restrictions));
 
-    symbolicPDE = parse_pde(pde, input_vars, output_vars; parameters=parameters)
-    results = find_ode(symbolicPDE; vars=input_vars ∪ output_vars ∪ parameters)
-    results = boundary_condition_similarity!(results, restrictions; input_vars=input_vars)
-    # info = Dict("input_vars" => input_vars,
-    #            "output_vars" => output_vars,
-    #           "restrictions" => restrictions,
-    #           "analysis_result" => results)
-    if verbose == false && length(results) > 0
-        return filter(p -> contains(p[1], "similarity"), results[1])
+    # 4) Add any parameters that appear inside the BC objects --------------------
+    bc_params = convert(Vector{Symbolics.Num}, union(map(bc -> bc[3], parsed_bcs)...))
+    all_params = convert(Vector{Symbolics.Num}, union(user_params, bc_params))
+
+    # 5) Extract restrictions and output variables from BCs ----------------------
+    # `restrictions` are the BC objects the similarity step needs.
+    restrictions = map(bc -> bc[1], parsed_bcs)
+
+    # Output variables are the dependent fields, e.g. ψ in ψ(x,y)
+    # The "function" entry is assumed to be a Symbolics function term
+    output_vars = convert(Vector{Symbolics.Num},
+                          union(map(bc -> bc["function"], restrictions)...))
+
+    # 6) Build a symbolic PDE from the input/output vars and parameters ----------
+    symbolic_pde = parse_pde(pde, input_vars, output_vars; parameters = all_params)
+
+    # 7) Run the similarity analysis to find ODE(s) and scaling ------------------
+    # Provide the full variable set to the analyzer
+    full_var_set = input_vars ∪ output_vars ∪ all_params
+    results = find_ode(symbolic_pde; vars = full_var_set)
+
+    # 8) Propagate boundary conditions through the similarity map ----------------
+    results = boundary_condition_similarity!(results, restrictions; input_vars = input_vars)
+
+    # 9) Return either a concise similarity summary or the full result -----------
+    if !verbose && !isempty(results)
+        # Keep only the first entry that contains "similarity" in its key
+        filtered = filter(p -> contains(p[1], "similarity"), results[1])
+        return filtered
     end
     return results
 end
-
-# Test the function with an example
-#parsed_conditions = find_similarity("dw/dt = w * d2w/d2r", "w(r=Inf, t) = 0; w(r, t=0) = U0")
-#parsed_conditions = find_similarity("du/dt + 6 * u * du/dx + d3u/d3x = 0", "u(x=Inf, t) = 0")
-#println(parsed_conditions)
-
-# @variables t r u(r, t)# η(x, y) f(η)
-# symbolicPDE = Differential(t)(u) - Differential(r)(Differential(r)(u))
-# vars = [t, r, u];
-# result = find_ode(symbolicPDE; vars=vars)
-# @variables x t u(t, x)# η(x, y) f(η)
-# Dt = Differential(t); Dx = Differential(x)
-# symbolicPDE = Dt(u) + 6*u*Dx(u) + Dx(Dx(Dx(u)))
-# vars = [t, x, u];
-# result = find_ode(symbolicPDE; vars=vars)
