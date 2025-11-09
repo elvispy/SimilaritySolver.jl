@@ -7,7 +7,7 @@ pde = "dψ/dy * d2ψ/dxdy - dψ/dx * d2ψ/d2y - ν * d3ψ/d3y = 0"
 bcs = "ψ(x, y=0) = 0; dψ/dy(x, y=0) = 0; dψ/dy(x, y=Inf) = U∞"
 
 result = find_similarity(pde, bcs; parameters=["ν", "U∞"])
-#println(result)            # shows inputs/outputs, similarity variable η, reduced ODE, and transformed BCs
+println(result)            # shows inputs/outputs, similarity variable η, reduced ODE, and transformed BCs
 
 
 
