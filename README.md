@@ -88,7 +88,7 @@ Example:
 "du/dt + 6 * u * du/dx + d3u/d3x = 0"
 ```
 will be interpreted as:
-\[ \frac{\partial u}{\partial t} + 6u \frac{\partial u}{\partial x} + \frac{\partial^3 u}{\partial x^3} = 0 \]
+$\frac{\partial u}{\partial t} + 6u \frac{\partial u}{\partial x} + \frac{\partial^3 u}{\partial x^3} = 0$
 
 ### Boundary Condition Syntax
 Boundary conditions must be passed as a semicolon-separated string of assignments:
@@ -103,7 +103,7 @@ Variables are automatically split into:
 - **Outputs** (e.g. `u(x,y)`) — variables defined as functions of inputs
 
 The code then attempts similarity substitutions of the form:
-\[ \eta = y x^m \quad \text{and} \quad u(x, y) = y^n f(\eta) \]
+$\eta = y x^m$ and  $u(x, y) = y^n f(\eta)$
 and tries to find powers \( n, m \) that reduce the PDE.
 
 ---
