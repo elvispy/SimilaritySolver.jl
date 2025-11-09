@@ -56,6 +56,31 @@ result = find_similarity("du/dt + 6 * u * du/dx + d3u/d3x = 0", "u(x=Inf, t) = 0
 println(result)
 ```
 
+### Blasius Boundary Layer (from `test/test2.jl`)
+
+The classical flat-plate boundary layer satisfies
+
+```text
+ψ_y ψ_{xy} - ψ_x ψ_{yy} - ν ψ_{yyy} = 0
+```
+
+with boundary conditions `ψ(x,0)=0`, `∂ψ/∂y(x,0)=0`, and `∂ψ/∂y(x,∞)=U∞`. You can reproduce
+the Blasius similarity reduction with:
+
+```julia
+using SimilaritySolver
+
+pde = "dψ/dy * d2ψ/dxdy - dψ/dx * d2ψ/d2y - ν * d3ψ/d3y = 0"
+bcs = "ψ(x, y=0) = 0; dψ/dy(x, y=0) = 0; dψ/dy(x, y=Inf) = U∞"
+
+result = find_similarity(pde, bcs; parameters=["ν", "U∞"])
+println(result["similarity_variable"])  # η(x, y) => y * x^m guess that succeeded
+println(result["output_similarity"])    # ψ(x, y) => x^n f(η)
+println(result["PDE_similarity"])       # reduced ODE (Blasius: f''' + 0.5 f f'' = 0)
+```
+
+`result["PDE_similarity"]` contains the familiar Blasius ODE (up to scaling by the supplied parameters), making it easy to hand the reduced system to an ODE solver.
+
 ### Parse Boundary Conditions
 
 ```julia
@@ -151,4 +176,3 @@ MIT License. See `LICENSE` file for details.
 ## 📬 Contact
 
 Maintained by [@elvispy](https://github.com/elvispy). For academic collaborations or bug reports, feel free to open an issue or email directly.
-
