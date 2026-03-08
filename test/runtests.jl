@@ -113,3 +113,34 @@ end
 
  end
 
+@testset "find_ode_dilation/heatEqn" begin
+    @variables x t u(..)
+    Dt = Differential(t); Dx = Differential(x)
+    heat = Dt(u(x,t)) - Dx(Dx(u(x,t)))
+    results = find_ode_dilation(heat; indep_vars=[x,t], dep_vars=[u(x,t)])
+    @test !isempty(results)
+    # similarity variable should be η = x / t^(1/2)
+    η_expr = results[1]["similarity_variable"]
+    @test occursin("t", string(η_expr))  # t appears in η
+    @test occursin("x", string(η_expr))  # x appears in η
+    ode_str = string(results[1]["PDE"])
+    # ODE must contain f'' (2nd derivative of f_dil)
+    @test occursin("Differential(η_bare)(Differential(η_bare)(f_dil", ode_str)
+end
+
+@testset "find_ode_dilation/KdV" begin
+    @variables x t u(..)
+    Dt = Differential(t); Dx = Differential(x)
+    kdv = Dt(u(x,t)) + 6*u(x,t)*Dx(u(x,t)) + Dx(Dx(Dx(u(x,t))))
+    results = find_ode_dilation(kdv; indep_vars=[x,t], dep_vars=[u(x,t)])
+    @test !isempty(results)
+    # similarity variable: η = x / t^(1/3)
+    η_str = string(results[1]["similarity_variable"])
+    @test occursin("1//3", η_str) || occursin("(1//3)", η_str)
+    # scaling exponent: γ = -2
+    @test results[1]["gamma"] == -2//1
+    ode_str = string(results[1]["PDE"])
+    # ODE must contain f''' (3rd derivative of f_dil)
+    @test occursin("Differential(η_bare)(Differential(η_bare)(Differential(η_bare)(f_dil", ode_str)
+end
+
