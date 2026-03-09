@@ -159,28 +159,38 @@ Matrix A of size (n_terms-1, n_params). Its null space gives the valid
 dilation exponents. Columns are ordered as [a_x1, …, a_xn, c_u1, …, c_um].
 """
 function build_invariance_system(pde, indep_vars::Vector, dep_vars::Vector)
+    pdes = (pde isa AbstractVector) ? pde : [pde]
     indep_map, dep_map = _make_maps(indep_vars, dep_vars)
     # stable column ordering
     param_names = vcat([indep_map[k] for k in [Symbolics.unwrap(v).name for v in indep_vars]],
                        [dep_map[begin_dep_name(v)] for v in dep_vars])
 
-    raw   = Symbolics.unwrap(pde)
-    terms = _collect_add_terms(raw)
-    degs  = [_scaling_degree_raw(t, indep_map, dep_map) for t in terms]
-
     n_params = length(param_names)
-    n_terms  = length(degs)
+    A_rows = Vector{Vector{Float64}}()
 
-    n_terms <= 1 && return zeros(Float64, 0, n_params), param_names
+    for p in pdes
+        raw   = Symbolics.unwrap(p)
+        terms = _collect_add_terms(raw)
+        degs  = [_scaling_degree_raw(t, indep_map, dep_map) for t in terms]
+        n_terms = length(degs)
+        n_terms <= 1 && continue
 
-    A = zeros(Float64, n_terms - 1, n_params)
-    ref = degs[1]
-    for i in 2:n_terms
-        diff = _add_degrees(degs[i], _neg_degree(ref))
-        for (j, pname) in enumerate(param_names)
-            A[i-1, j] = Float64(get(diff, pname, 0//1))
+        ref = degs[1]
+        for i in 2:n_terms
+            diff = _add_degrees(degs[i], _neg_degree(ref))
+            row = zeros(Float64, n_params)
+            for (j, pname) in enumerate(param_names)
+                row[j] = Float64(get(diff, pname, 0//1))
+            end
+            push!(A_rows, row)
         end
     end
+
+    if isempty(A_rows)
+        return zeros(Float64, 0, n_params), param_names
+    end
+
+    A = reduce(hcat, A_rows)' |> Matrix{Float64}
     return A, param_names
 end
 
@@ -289,6 +299,59 @@ end
 
 
 # ---------------------------------------------------------------------------
+# Null-space combination search (Phase 2.5)
+# ---------------------------------------------------------------------------
+
+"""
+    _expand_null_space_combinations(null_vecs; N=4) -> Vector{Vector{Rational{Int}}}
+
+Given the basis vectors of a null space, return all unique integer linear combinations
+`Σ cᵢ·vᵢ` with `|cᵢ| ≤ N`, normalized and de-duplicated.  The original basis vectors
+are always included first.  For a 1-D null space returns the input unchanged.
+
+This is needed because the physically relevant similarity variable often lies in the span
+of the null-space basis but is not itself a basis vector (e.g. the Barenblatt-Pattle
+solution for nonlinear diffusion, where the physical vector is `2v₁ - v₂`).
+"""
+function _expand_null_space_combinations(null_vecs::Vector{Vector{Rational{Int}}}; N::Int=4)
+    k = length(null_vecs)
+    k <= 1 && return null_vecs          # nothing to combine for 1-D null space
+
+    seen   = Set{Vector{Rational{Int}}}()
+    # Collect (L1_norm_of_coeffs, normalised_vector) for sorting
+    pending = Vector{Tuple{Int, Vector{Rational{Int}}}}()
+
+    # Helper: normalise a rational vector (first-nonzero positive, integer, primitive)
+    function _normalise(v::Vector{Rational{Int}})
+        all(iszero, v) && return nothing
+        idx = findfirst(!iszero, v)
+        v   = v[idx] < 0 ? -v : copy(v)
+        den = lcm([x.den for x in v if !iszero(x)])
+        vi  = [Rational{Int}(numerator(x * den), 1) for x in v]
+        g   = gcd([abs(numerator(x)) for x in vi if !iszero(x)])
+        return vi .// g
+    end
+
+    # Enumerate all integer-coefficient combinations (including basis vectors as unit coeffs)
+    ranges = [(-N):N for _ in 1:k]
+    for coeffs in Iterators.product(ranges...)
+        all(iszero, coeffs) && continue
+        l1 = sum(abs, coeffs)
+        v_comb = sum(coeffs[i] * null_vecs[i] for i in 1:k)
+        vn = _normalise(v_comb)
+        vn === nothing && continue
+        vn in seen && continue
+        push!(seen, vn)
+        push!(pending, (l1, vn))
+    end
+
+    # Sort by L1 norm of coefficients: simpler combinations first (parsimony order)
+    sort!(pending; by = t -> t[1])
+    return [t[2] for t in pending]
+end
+
+
+# ---------------------------------------------------------------------------
 # Build similarity ansatz from a null-space vector
 # ---------------------------------------------------------------------------
 
@@ -316,23 +379,17 @@ function build_similarity_candidates(null_vec, param_names, indep_vars, dep_vars
         for i in 1:n_i
             i == pivot_idx && continue
             iszero(α_norm[i]) && continue
-            # invariant combination: x_pivot * x_i^{-a_pivot/a_i}
-            # with α_norm[i] = a_i/a_pivot, the exponent is -1/α_norm[i]
             exp_i = -(α_norm[i].den // α_norm[i].num)
             η_expr = η_expr * indep_vars[i]^exp_i
         end
 
-        for (j, dep) in enumerate(dep_vars)
-            push!(results, (
-                η_expr     = η_expr,
-                pivot      = xp,
-                pivot_idx  = pivot_idx,
-                gamma      = γ_norm[j],
-                dep_idx    = j,
-                alpha_norm = α_norm,
-                gamma_norm = γ_norm,
-            ))
-        end
+        push!(results, (
+            η_expr     = η_expr,
+            pivot      = xp,
+            pivot_idx  = pivot_idx,
+            gamma_vals = γ_norm,
+            alpha_norm = α_norm,
+        ))
     end
     return results
 end
@@ -366,22 +423,36 @@ non-trivial derivative).  All other variables differentiate only through f(η_sy
 because ∂_xi(pivot) = 0 for xi ≠ pivot.
 """
 function _leibniz_dep_val(indep_vars::Vector, pivot_idx::Int,
-                           gamma::Rational{Int}, f_fn, η_sym,
+                           gamma::Rational{Int}, f_fn, η_expr,
                            orders::Vector{Int})
     pivot_var = indep_vars[pivot_idx]
     k_piv     = orders[pivot_idx]
-    result    = Symbolics.Num(0)
+
+    # Use a dummy function η_fn for the chain rule expansion
+    any_tuple = Tuple{[Any for _ in 1:length(indep_vars)]...}
+    η_fn_sym = Symbolics.variable(:η_dil, T=Symbolics.FnType{any_tuple, Real})
+    η_sym = η_fn_sym(indep_vars...)
+
+    result = Symbolics.Num(0)
     for j in 0:k_piv
         ff = _ffact(gamma, j)
         iszero(ff) && continue
         u_j = ff * pivot_var^(gamma - j)
-        # Build D_pivot^(k_piv-j) · Π_{i≠pivot} D_xi^orders[i] of f(η_sym)
+        
+        # 1. Build derivative chain of f(η_sym)
         v = f_fn(η_sym)
         for i in eachindex(indep_vars)
             cnt = (i == pivot_idx) ? (k_piv - j) : orders[i]
             for _ in 1:cnt; v = Differential(indep_vars[i])(v); end
         end
-        v      = expand_derivatives(v)
+        # 2. Expand: f(η_sym)_x = f'(η_sym) * η_sym_x
+        v = expand_derivatives(v)
+        # 3. Substitute η_sym -> η_expr and expand again: η_sym_x -> (x/t)_x = 1/t
+        v = substitute(v, η_sym => η_expr)
+        v = expand_derivatives(v)
+        # 4. Hide η_expr -> η_bare
+        v = substitute(v, η_expr => η_bare)
+        
         result = result + binomial(k_piv, j) * u_j * v
     end
     return result
@@ -396,26 +467,42 @@ itself).  Returns the raw (unwrapped) expressions for use as substitution keys.
 """
 function _scan_dep_keys(raw, dep_raw)
     keys = Any[]
-    # Base: is this node dep_raw itself?
-    if isequal(Symbolics.Num(raw), Symbolics.Num(dep_raw))
-        push!(keys, raw)
+    # Handle Vector of expressions
+    if raw isa AbstractVector
+        for r in raw
+            append!(keys, _scan_dep_keys(r, dep_raw))
+        end
         return keys
     end
-    SymbolicUtils.iscall(raw) || return keys
-    op   = SymbolicUtils.operation(raw)
-    args = SymbolicUtils.arguments(raw)
+
+    # Unwrap if Num
+    raw_unw = Symbolics.unwrap(raw)
+    dep_unw = Symbolics.unwrap(dep_raw)
+
+    # Base case: is this node dep_raw itself?
+    if isequal(raw_unw, dep_unw)
+        push!(keys, raw_unw)
+        return keys
+    end
+    
+    SymbolicUtils.iscall(raw_unw) || return keys
+    op   = SymbolicUtils.operation(raw_unw)
+    args = SymbolicUtils.arguments(raw_unw)
+
+    # Recursive check for all children (dep may appear nested inside products, etc.)
+    for a in args
+        append!(keys, _scan_dep_keys(a, dep_unw))
+    end
+
+    # If this is a differential chain, check if inner part is a dep-chain
     if op isa Differential
-        # This node is D_xi(inner); check if inner is a dep-chain
-        inner_keys = _scan_dep_keys(args[1], dep_raw)
+        inner_keys = _scan_dep_keys(args[1], dep_unw)
         if !isempty(inner_keys)
-            push!(keys, raw)   # this outer node is also a dep-chain key
+            push!(keys, raw_unw)   # this outer node is also a dep-chain key
         end
     end
-    # Always recurse into all children (dep may appear nested inside products, etc.)
-    for a in args
-        append!(keys, _scan_dep_keys(a, dep_raw))
-    end
-    return keys
+
+    return unique(keys)
 end
 
 """
@@ -445,22 +532,26 @@ function _dep_diff_orders(key_raw, dep_raw, indep_vars)
 end
 
 """
-    _build_dep_subs(pde, dep, indep_vars, pivot_idx, gamma, f_fn, η_sym)
+    _build_dep_subs(pdes, dep, indep_vars, pivot_idx, gamma, f_fn, η_sym)
 
-Scan `pde` for every derivative pattern applied to `dep`, then return a
+Scan `pdes` for every derivative pattern applied to `dep`, then return a
 substitution dictionary mapping each pattern to the correct Leibniz expansion
 of  pivot^γ · f(η_sym).
 
 This is order-agnostic: it works for PDEs of any derivative order without any
 pre-specified maximum.
 """
-function _build_dep_subs(pde, dep, indep_vars::Vector, pivot_idx::Int,
+function _build_dep_subs(pdes, dep, indep_vars::Vector, pivot_idx::Int,
                           gamma::Rational{Int}, f_fn, η_sym)
     dep_raw = Symbolics.unwrap(dep)
-    pde_raw = Symbolics.unwrap(pde)
 
-    # Collect all dep-chain keys from the PDE tree (deduplicated)
-    raw_keys = unique(_scan_dep_keys(pde_raw, dep_raw))
+    # Collect dep-chain keys from all PDEs (scalar or vector input)
+    all_raw_keys = if pdes isa AbstractVector
+        mapreduce(p -> _scan_dep_keys(Symbolics.unwrap(p), dep_raw), vcat, pdes)
+    else
+        _scan_dep_keys(Symbolics.unwrap(pdes), dep_raw)
+    end
+    raw_keys = unique(all_raw_keys)
 
     subs = Dict{Any,Any}()
     for rk in raw_keys
@@ -485,43 +576,20 @@ Leibniz coefficients for n ≥ 3, rational γ < 0.
 """
 function reduce_to_ode(pde, indep_vars::Vector, dep_vars::Vector,
                         η_expr, pivot, pivot_idx::Int,
-                        gamma::Rational{Int}, dep_idx::Int,
+                        gamma_vals::Vector{Rational{Int}},
                         alpha_norm::Vector{Rational{Int}})
-    dep = dep_vars[dep_idx]
-    S(e, d) = simplify(substitute(e, d); expand=true)
-
-    # Define η as a FUNCTION of the independent variables so that chain rule works.
-    n_args    = length(indep_vars)
-    any_tuple = Tuple{[Any for _ in 1:n_args]...}
-    η_fn  = Symbolics.variable(:η_dil, T=Symbolics.FnType{any_tuple, Real})
-    η_sym = η_fn(indep_vars...)
-    f_fn  = Symbolics.variable(:f_dil, T=Symbolics.FnType{Tuple{Any}, Real})
-
-    # 1. Scan pde for every derivative pattern on dep, build substitution dict
-    #    via the Leibniz rule.  Order-agnostic: works for any PDE order.
-    #    Avoids the Symbolics bug in expand_derivatives(D_x^n(x^γ·f(η))).
-    dep_subs = _build_dep_subs(pde, dep, indep_vars, pivot_idx, gamma, f_fn, η_sym)
-    expr = substitute(pde, dep_subs)
-
-    # 2. Substitute chain-rule derivatives of η_sym (up to order 4) with concrete values.
-    chain_subs = Dict{Any,Any}()
-    function _add_chain_subs!(subs, sym_key, expr_val, depth)
-        depth == 0 && return
-        for xi in indep_vars
-            new_key = Differential(xi)(sym_key)
-            new_val = expand_derivatives(Differential(xi)(expr_val))
-            subs[new_key] = new_val
-            _add_chain_subs!(subs, new_key, new_val, depth - 1)
-        end
+    # 1. Build substitutions for ALL dependent variables across ALL PDEs.
+    # Expand derivatives first so that D(r*u*h) → u*h + r*Du*h + …
+    pde_expanded = pde isa AbstractVector ? expand_derivatives.(pde) : expand_derivatives(pde)
+    dep_subs = Dict{Any,Any}()
+    f_fns = [Symbolics.variable(Symbol("f_dil", j), T=Symbolics.FnType{Tuple{Any}, Real}) for j in eachindex(dep_vars)]
+    for (j, dep) in enumerate(dep_vars)
+        merge!(dep_subs, _build_dep_subs(pde_expanded, dep, indep_vars, pivot_idx, gamma_vals[j], f_fns[j], η_expr))
     end
-    _add_chain_subs!(chain_subs, η_sym, η_expr, 4)
-    expr = S(expr, chain_subs)
+    _sub_expand(e) = simplify(expand_derivatives(substitute(e, dep_subs)); expand=true)
+    expr = pde_expanded isa AbstractVector ? _sub_expand.(pde_expanded) : _sub_expand(pde_expanded)
 
-    # 3. Hide η_sym → η_bare, then expand_derivatives to zero out D_xi(η_bare) = 0.
-    expr = substitute(expr, η_sym => η_bare)
-    expr = simplify(expand_derivatives(expr); expand=true)
-
-    # 4. Express every non-pivot variable through η_bare:
+    # 2. Express every non-pivot variable through η_bare:
     #    xi = pivot^α_norm[i] · η_bare^{-α_norm[i]}
     other_subs = Dict{Any,Any}()
     for (i, xi) in enumerate(indep_vars)
@@ -529,20 +597,33 @@ function reduce_to_ode(pde, indep_vars::Vector, dep_vars::Vector,
         iszero(alpha_norm[i]) && continue
         other_subs[xi] = pivot^alpha_norm[i] * η_bare^(-alpha_norm[i])
     end
-    expr = S(expr, other_subs)
+    
+    if expr isa AbstractVector
+        expr = [simplify(substitute(e, other_subs); expand=true) for e in expr]
+        expr = [simplify(substitute(e, Dict(pivot => Symbolics.Num(1))); expand=true) for e in expr]
+        expr = [simplify(expand_derivatives(e); expand=true) for e in expr]
+    else
+        expr = simplify(substitute(expr, other_subs); expand=true)
+        expr = simplify(substitute(expr, Dict(pivot => Symbolics.Num(1))); expand=true)
+        expr = simplify(expand_derivatives(expr); expand=true)
+    end
 
-    # 5. Substitute pivot = 1 (PDE is scaling-homogeneous so pivot drops out).
-    expr2 = S(expr, Dict(pivot => Symbolics.Num(1)))
-
-    # 6. Check no independent variables remain.
-    remaining        = Num.(Symbolics.get_variables(expr2))
+    # 4. Check no independent variables remain.
+    expr2 = expr
+    remaining = if expr2 isa AbstractVector
+        Num.(mapreduce(e -> Symbolics.get_variables(e), union, expr2))
+    else
+        Num.(Symbolics.get_variables(expr2))
+    end
     still_has_indep  = any(r -> any(isequal(r), indep_vars), remaining)
     still_has_indep && return nothing
 
-    # 7. Divide out the minimal power of η_bare if present.
-    expr2 = _divide_min_eta_power(expr2, η_bare)
-
-    return expr2
+    # 5. Divide out the minimal power of η_bare if present.
+    if expr2 isa AbstractVector
+        return [_divide_min_eta_power(e, η_bare) for e in expr2]
+    else
+        return _divide_min_eta_power(expr2, η_bare)
+    end
 end
 
 
@@ -615,35 +696,49 @@ end
 """
     find_ode_dilation(pde; indep_vars, dep_vars, verbose=false)
 
-Dilation-method similarity solver.
+Dilation-method similarity solver.  Accepts a single PDE (`Num`) or a coupled
+system (`Vector{Num}`); in the latter case the shared dilation symmetry is found
+by stacking constraint rows from all PDEs into one invariance matrix.
 
-Returns a Vector of result Dicts (same key structure as `find_ode`):
-  "success", "PDE", "similarity_variable", "output_similarity", "PDE_similarity"
+Returns a `Vector{Dict{String,Any}}`. Each Dict has keys:
+- `"success"` — `true`
+- `"PDE"` / `"PDE_similarity"` — reduced ODE (`Num`) for scalar input, or
+  `Vector{Num}` (one ODE per input PDE) for system input
+- `"similarity_variable"` — the similarity variable η
+- `"output_similarity"` — `dep_vars => ansatz_exprs`
+- `"alpha_vec"` — `Vector{Rational}` of normalized indep-variable scaling exponents
+- `"gamma_vals"` — `Vector{Rational}` of scaling exponents, one per dep_var
+- `"gamma"` — scalar shorthand for `gamma_vals[1]` (backward compat; single dep_var)
 """
 function find_ode_dilation(pde; indep_vars::Vector, dep_vars::Vector, verbose::Bool=false)
     null_vecs, param_names = find_dilation_symmetry(pde, indep_vars, dep_vars)
 
+    # Expand with integer linear combinations so physically relevant similarity
+    # variables not aligned with a basis vector are also found (Phase 2.5).
+    all_vecs = _expand_null_space_combinations(null_vecs; N=4)
+
     results = Dict{String,Any}[]
 
-    for null_vec in null_vecs
+    for null_vec in all_vecs
         candidates = build_similarity_candidates(null_vec, param_names, indep_vars, dep_vars)
         for cand in candidates
             ode = reduce_to_ode(pde, indep_vars, dep_vars,
                                  cand.η_expr, cand.pivot, cand.pivot_idx,
-                                 cand.gamma, cand.dep_idx, cand.alpha_norm)
+                                 cand.gamma_vals, cand.alpha_norm)
             ode === nothing && continue
 
-            dep = dep_vars[cand.dep_idx]
-            ansatz_expr = iszero(cand.gamma) ? nothing : cand.pivot^cand.gamma
+            ansatz_exprs = Num[iszero(g) ? Num(1) : cand.pivot^g for g in cand.gamma_vals]
 
             result = Dict{String,Any}(
-                "success"           => true,
-                "PDE"               => ode,
+                "success"             => true,
+                "PDE"                 => ode,
                 "similarity_variable" => cand.η_expr,
-                "output_similarity"   => [dep] => ansatz_expr,
+                "output_similarity"   => dep_vars => ansatz_exprs,
                 "PDE_similarity"      => ode,
-                "alpha_norm"          => cand.alpha_norm,
-                "gamma"               => cand.gamma,
+                "alpha_vec"           => cand.alpha_norm,
+                "gamma_vals"          => cand.gamma_vals,
+                # backward-compat scalar key (first dep_var); for systems use "gamma_vals"
+                "gamma"               => cand.gamma_vals[1],
             )
             push!(results, result)
             verbose || break
