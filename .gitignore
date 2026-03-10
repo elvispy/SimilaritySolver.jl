@@ -1,3 +1,24 @@
+# Package Manifest
 /Manifest.toml
+
+# Build Artifacts
+/docs/build/
+/docs/Manifest.toml
+
+# IDE and Environment
+.vscode/
+.claude/
+.gemini/
 .worktrees/
-\n.gemini/
+.history/
+.julia_depot/
+
+# Internal Project Docs / Temporary Files
+/SYMBOLICS_BUGS.md
+/similarity.pdf
+reproduce_bug.jl
+
+# OS-specific
+.DS_Store
+\n# Superpowers Plans and Specs\n/docs/superpowers/
+docs/superpowers/

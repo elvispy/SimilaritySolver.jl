@@ -133,13 +133,79 @@ and tries to find powers \( n, m \) that reduce the PDE.
 
 ---
 
+## 🔬 Dilation Method (Recommended)
+
+The dilation method finds similarity solutions by exact linear algebra — no guessing
+or scanning. It assigns a formal scaling exponent to each variable, builds the
+invariance system whose null space encodes all valid similarity transformations, and
+derives the reduced ODE from the null-space vector.
+
+### `find_ode_dilation` — Symbolic API
+
+```julia
+using SimilaritySolver, Symbolics
+
+# Heat equation: u_t = u_xx
+@variables x t u(..)
+Dt = Differential(t); Dx = Differential(x)
+heat = Dt(u(x,t)) - Dx(Dx(u(x,t)))
+results = find_ode_dilation(heat; indep_vars=[x,t], dep_vars=[u(x,t)])
+
+println(results[1]["similarity_variable"])  # x*t^(-1//2)
+println(results[1]["gamma"])                # 0//1  (u scales as t^0)
+println(results[1]["PDE"])                  # ODE: -(1//2)*η_bare*Differential(η_bare)(f_dil(...)) - Differential(η_bare)(Differential(η_bare)(f_dil(...)))
+```
+
+```julia
+# KdV: u_t + 6u u_x + u_xxx = 0
+@variables x t u(..)
+Dt = Differential(t); Dx = Differential(x)
+kdv = Dt(u(x,t)) + 6*u(x,t)*Dx(u(x,t)) + Dx(Dx(Dx(u(x,t))))
+results = find_ode_dilation(kdv; indep_vars=[x,t], dep_vars=[u(x,t)])
+
+println(results[1]["similarity_variable"])  # x*t^(-1//3)
+println(results[1]["gamma"])                # -2//1  (u ~ t^(-2/3))
+```
+
+### `find_similarity_v2` — String API
+
+`find_similarity_v2` wraps `find_ode_dilation` with the same string-based interface
+as `find_similarity`:
+
+```julia
+result = find_similarity_v2(
+    "du/dt - d2u/d2x = 0",
+    "u(x=Inf, t) = 0; u(x, t=0) = 1"
+)
+println(result["similarity_variable"])  # η = x * t^(-1//2)
+println(result["PDE_similarity"])       # the reduced heat ODE
+```
+
+### Result Dict Structure
+
+Each entry in the `Vector{Dict}` returned by `find_ode_dilation` has the following keys:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `"PDE"` | `Num` | Reduced ODE expression (set to zero) |
+| `"PDE_similarity"` | `Num` | Same ODE, simplified |
+| `"similarity_variable"` | `Num` | The similarity variable η in terms of original vars |
+| `"output_similarity"` | `Dict` | Maps each dep. var to its ansatz (e.g. `u => t^γ·f(η)`) |
+| `"gamma"` | `Rational` | Scaling exponent γ of the dependent variable |
+| `"substitutions"` | `Dict` | Raw scaling-exponent values used |
+
+---
+
 ## 📖 API Overview
 
-### `find_ode(symbolicPDE::Num; vars::Vector{Num})`
-Attempts to find a similarity transformation and reduce the given PDE to an ODE.
+### `find_ode_dilation(pde::Num; indep_vars, dep_vars, verbose=false)`
+Exact dilation-symmetry method. Recommended for all new use.
+
+### `find_similarity_v2(pde::String, boundary_conditions::String; parameters=[], verbose=false)`
+String-API wrapper for `find_ode_dilation`.
 
 ### `find_similarity(pde::String, boundary_conditions::String)`
-Full pipeline: parse PDE + boundary conditions, attempt similarity reduction.
+Original heuristic solver (power-scanning). Kept for backwards compatibility.
 
 ### `parse_boundary_condition(condition::String)`
 Parses a boundary condition string into symbolic structure.
@@ -154,7 +220,14 @@ Splits symbolic variables into inputs and outputs.
 
 ## 🧪 Testing
 
-You can run the test examples at the bottom of the main file to validate the behavior. For full test coverage, consider structuring tests using `Test.jl` in a `test/` folder.
+Run the full test suite:
+
+```bash
+julia --project test/runtests.jl
+```
+
+Expected: all `find_ode_dilation` tests pass; the old `find_ode` tests are marked
+`Broken` due to a Symbolics.jl API change (see `SYMBOLICS_BUGS.md`).
 
 ---
 
