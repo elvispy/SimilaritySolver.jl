@@ -81,7 +81,9 @@ function _scaling_degree_raw(raw, indep_map::Dict{Symbol,Symbol}, dep_map::Dict{
         dx_raw = Symbolics.unwrap(op.x)
         dx_nm  = SymbolicUtils.issym(dx_raw) ? dx_raw.name : nothing
         if dx_nm !== nothing && haskey(indep_map, dx_nm)
-            return _add_degrees(inner_deg, ScalingDegree(indep_map[dx_nm] => -1//1))
+            # In newer Symbolics, op has an .order field (e.g. D^3)
+            ord = try Int(op.order) catch; 1 end
+            return _add_degrees(inner_deg, ScalingDegree(indep_map[dx_nm] => -Rational{Int}(ord)))
         end
         return inner_deg
     end
@@ -113,13 +115,17 @@ function _scaling_degree_raw(raw, indep_map::Dict{Symbol,Symbol}, dep_map::Dict{
     # --- Power: Pow(base, exp) ---
     if op === (^)
         base_raw, exp_raw = args
-        exp_val = try
-            Float64(Symbolics.unwrap(Symbolics.Num(exp_raw)))
-        catch
-            return _zero_degree()
+        unw_exp = Symbolics.unwrap(exp_raw)
+        exp_val = if hasproperty(unw_exp, :val)
+            unw_exp.val
+        elseif unw_exp isa Real
+            unw_exp
+        else
+            try Float64(unw_exp) catch; nothing end
         end
-        isfinite(exp_val) || return _zero_degree()
-        exp_rat = rationalize(Int, exp_val; tol=1e-9)
+        
+        (isnothing(exp_val) || !isfinite(Float64(exp_val))) && return _zero_degree()
+        exp_rat = rationalize(Int, Float64(exp_val); tol=1e-9)
         return _scale_degree(_scaling_degree_raw(base_raw, indep_map, dep_map), exp_rat)
     end
 
@@ -429,8 +435,7 @@ function _leibniz_dep_val(indep_vars::Vector, pivot_idx::Int,
     k_piv     = orders[pivot_idx]
 
     # Use a dummy function η_fn for the chain rule expansion
-    any_tuple = Tuple{[Any for _ in 1:length(indep_vars)]...}
-    η_fn_sym = Symbolics.variable(:η_dil, T=Symbolics.FnType{any_tuple, Real})
+    η_fn_sym = eval(:(@variables η_dil(..)))[1]
     η_sym = η_fn_sym(indep_vars...)
 
     result = Symbolics.Num(0)
@@ -448,10 +453,12 @@ function _leibniz_dep_val(indep_vars::Vector, pivot_idx::Int,
         # 2. Expand: f(η_sym)_x = f'(η_sym) * η_sym_x
         v = expand_derivatives(v)
         # 3. Substitute η_sym -> η_expr and expand again: η_sym_x -> (x/t)_x = 1/t
-        v = substitute(v, η_sym => η_expr)
+        # Use diff2term to ensure derivatives are matched correctly
+        v = Symbolics.substitute(Symbolics.diff2term(Symbolics.value(v)), 
+                                 Dict(Symbolics.diff2term(Symbolics.value(η_sym)) => η_expr))
         v = expand_derivatives(v)
         # 4. Hide η_expr -> η_bare
-        v = substitute(v, η_expr => η_bare)
+        v = Symbolics.substitute(v, Dict(η_expr => η_bare))
         
         result = result + binomial(k_piv, j) * u_j * v
     end
@@ -582,7 +589,7 @@ function reduce_to_ode(pde, indep_vars::Vector, dep_vars::Vector,
     # Expand derivatives first so that D(r*u*h) → u*h + r*Du*h + …
     pde_expanded = pde isa AbstractVector ? expand_derivatives.(pde) : expand_derivatives(pde)
     dep_subs = Dict{Any,Any}()
-    f_fns = [Symbolics.variable(Symbol("f_dil", j), T=Symbolics.FnType{Tuple{Any}, Real}) for j in eachindex(dep_vars)]
+    f_fns = [eval(:(@variables $(Symbol("f_dil", j))(..)))[1] for j in eachindex(dep_vars)]
     for (j, dep) in enumerate(dep_vars)
         merge!(dep_subs, _build_dep_subs(pde_expanded, dep, indep_vars, pivot_idx, gamma_vals[j], f_fns[j], η_expr))
     end
@@ -755,10 +762,44 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    find_similarity_v2(pde, bcs; parameters=[], verbose=false)
+    find_similarity_v2(pde, boundary_conditions; parameters=[], verbose=false)
 
-Like `find_similarity` but uses the dilation method internally.
-Parses the same string syntax and returns the same result structure.
+String-API wrapper around [`find_ode_dilation`](@ref) that mirrors the interface
+of `find_similarity` (the original heuristic solver) but uses the exact
+dilation/scaling-symmetry method instead.
+
+# Arguments
+- `pde::String`: PDE in string notation, e.g. `"du/dt + 6*u*du/dx + d3u/d3x = 0"`.
+  Derivatives are written as `d<n><var>/d<n><wrt>` where `<n>` is the order
+  (omit for first order). The right-hand side after `=` is subtracted automatically.
+- `boundary_conditions::String`: Semicolon-separated boundary conditions, e.g.
+  `"u(x=Inf, t) = 0; u(x, t=0) = 1"`. Each entry fixes one or more independent
+  variables and assigns a value to the dependent variable there.
+- `parameters`: Optional list of parameter names (String or `Symbolics.Num`) that
+  appear in the PDE but are not independent or dependent variables (e.g. `["ν", "U∞"]`).
+- `verbose::Bool`: If `false` (default), returns a filtered `Dict` of the first
+  similarity result containing only keys with `"similarity"` in their name
+  (`"similarity_variable"`, `"PDE_similarity"`, `"output_similarity"`).
+  If `true`, returns the full `Vector{Dict}` from `find_ode_dilation`.
+
+# Returns
+- `verbose=false`: `Dict{String,Any}` with keys
+  `"similarity_variable"`, `"PDE_similarity"`, `"output_similarity"`.
+- `verbose=true`: `Vector{Dict{String,Any}}` — one entry per null-space candidate,
+  each with all keys from `find_ode_dilation` (including `"PDE"`, `"gamma"`,
+  `"substitutions"`, `"similarity_variable"`, etc.).
+- Empty `Dict` / empty `Vector` if no similarity solution exists.
+
+# Example
+```julia
+using SimilaritySolver
+result = find_similarity_v2(
+    "du/dt - d2u/d2x = 0",
+    "u(x=Inf, t) = 0; u(x, t=0) = 1"
+)
+println(result["similarity_variable"])  # η = x * t^(-1//2)
+println(result["PDE_similarity"])       # reduced heat ODE: f'' + (1/2)η f' = 0
+```
 """
 function find_similarity_v2(
     pde::String,
@@ -778,8 +819,19 @@ function find_similarity_v2(
     all_params  = convert(Vector{Symbolics.Num}, union(user_params, bc_params))
 
     restrictions = map(bc -> bc[1], parsed_bcs)
-    output_vars  = convert(Vector{Symbolics.Num},
-        reduce(union, map(bc -> bc["function"], restrictions); init=Symbolics.Num[]))
+
+    # Extract dep vars from the PDE string, NOT from BCs.
+    # parse_boundary_condition misparses derivative BCs like "dψ/dy(x,y=0)=0"
+    # as a new function "dy", which would poison dep_vars with a spurious variable,
+    # widen the null space, and crash reduce_to_ode.
+    dep_names = unique([m[1] for m in eachmatch(r"d\d?(\w+)(?:\(.*?\))?/", pde)])
+    indep_strs = string.(input_vars)
+    param_strs = string.(all_params)
+    dep_names  = filter(n -> !(n in indep_strs) && !(n in param_strs), dep_names)
+    output_vars = convert(Vector{Symbolics.Num}, [
+        eval(:(@variables $(Symbol(n))(..)))[1](input_vars...)
+        for n in dep_names
+    ])
 
     symbolic_pde = parse_pde(pde, input_vars, output_vars; parameters=all_params)
 
@@ -788,7 +840,11 @@ function find_similarity_v2(
                                  dep_vars=output_vars,
                                  verbose=verbose)
 
-    results = boundary_condition_similarity!(results, restrictions; input_vars=input_vars)
+    # NOTE: boundary_condition_similarity! (from similaritySolve.jl) expects the old
+    # find_ode result format (output_similarity as a Pair, substitutions as a Dict of
+    # similarity var → expr). The new find_ode_dilation format is incompatible.
+    # BC transformation is skipped here for now; tracked as a roadmap item.
+    # results = boundary_condition_similarity!(results, restrictions; input_vars=input_vars)
 
     if !verbose && !isempty(results)
         filtered = filter(p -> occursin("similarity", p[1]), results[1])
