@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - main
+      - 'feat/**'
     tags: ['*']
   pull_request:
   workflow_dispatch:

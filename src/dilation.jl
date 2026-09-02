@@ -167,6 +167,8 @@ dilation exponents. Columns are ordered as [a_x1, …, a_xn, c_u1, …, c_um].
 function build_invariance_system(pde, indep_vars::Vector, dep_vars::Vector)
     pdes = (pde isa AbstractVector) ? pde : [pde]
     indep_map, dep_map = _make_maps(indep_vars, dep_vars)
+    # Free symbols that are neither indep nor dep vars (physical parameters) get
+    # zero scaling degree automatically in _scaling_degree_raw.
     # stable column ordering
     param_names = vcat([indep_map[k] for k in [Symbolics.unwrap(v).name for v in indep_vars]],
                        [dep_map[begin_dep_name(v)] for v in dep_vars])

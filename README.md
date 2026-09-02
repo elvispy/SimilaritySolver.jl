@@ -192,7 +192,8 @@ Each entry in the `Vector{Dict}` returned by `find_ode_dilation` has the followi
 | `"similarity_variable"` | `Num` | The similarity variable η in terms of original vars |
 | `"output_similarity"` | `Dict` | Maps each dep. var to its ansatz (e.g. `u => t^γ·f(η)`) |
 | `"gamma"` | `Rational` | Scaling exponent γ of the dependent variable |
-| `"substitutions"` | `Dict` | Raw scaling-exponent values used |
+| `"alpha_vec"` | `Vector{Rational}` | Normalized scaling exponents of the independent variables |
+| `"gamma_vals"` | `Vector{Rational}` | Scaling exponent per dependent variable (systems) |
 
 ---
 

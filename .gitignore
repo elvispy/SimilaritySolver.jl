@@ -15,10 +15,12 @@
 
 # Internal Project Docs / Temporary Files
 /SYMBOLICS_BUGS.md
-/similarity.pdf
+lit-review/
 reproduce_bug.jl
 
 # OS-specific
 .DS_Store
-\n# Superpowers Plans and Specs\n/docs/superpowers/
 docs/superpowers/
+
+# Literature PDFs (copyrighted, not redistributed)
+/docs/assets/

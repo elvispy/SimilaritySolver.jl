@@ -270,3 +270,65 @@ end
     @test any_third
 end
 
+@testset "find_ode_dilation/PowerLaw_ThinFilm" begin
+    # Generalized Thin Film for Power-Law Fluid (n=2, shear-thickening)
+    # Motivated by Zakeri et al. (JFM 2025) SHB breakup asymptotics.
+    # h_t + ∂/∂x [ h^4 * (h_xxx)^2 ] = 0
+    @variables x t h(..)
+    Dx = Differential(x); Dt = Differential(t)
+    h_xxx = Dx(Dx(Dx(h(x,t))))
+    flux = (h(x,t)^4) * (h_xxx)^2
+    eq = Dt(h(x,t)) + Dx(flux)
+    
+    results = find_ode_dilation(eq; indep_vars=[x, t], dep_vars=[h(x,t)], verbose=true)
+    @test !isempty(results)
+    
+    # Expected scaling for n=2: η = x / t^(1/7)
+    # The discovery loop returns several candidates; we search for the physically motivated one.
+    @test any(r -> begin
+        η_str = string(r["similarity_variable"])
+        # Match the rational power 1//7 and ensure it depends on t (non-trivial)
+        occursin("1//7", η_str) && occursin("t", η_str) && iszero(r["gamma"])
+    end, results)
+end
+
+@testset "find_ode_dilation/EDS2025_IMCE" begin
+    # Full inertia–Marangoni–capillary–extensional (IMCE) system,
+    # Eshima, Deike & Stone, J. Fluid Mech. 1023 (2025) A15, eqs (1.3b), (1.3c), (3.1).
+    # VALIDATION test: the paper already gives this similarity solution
+    # (Table 1 and §3.4.1, eqs 3.19–3.21): r ~ t^(1/2), u ~ t^(-1/2), h ~ 1, Γ ~ t^(-1).
+    @variables r t u(..) h(..) Γ(..) M Re
+    Dr = Differential(r); Dt = Differential(t)
+    U = u(r,t); H = h(r,t); G = Γ(r,t)
+
+    # Eq 3.1 (verbatim structure): u_t + u u_r = -(2/h) Γ_r
+    #   + (1/(2M)) ∂_r[(1/r) ∂_r(r h_r)]
+    #   + (4/Re) (1/h) [ ∂_r( (h/r) ∂_r(r u) ) - (1/2) (u/r) h_r ]
+    term_inertia     = Dt(U) + U*Dr(U)
+    term_marangoni   = -(2/H) * Dr(G)
+    term_capillary   = (1/(2M)) * Dr( (1/r) * Dr( r * Dr(H) ) )
+    term_extensional = (4/Re) * (1/H) * ( Dr( (H/r) * Dr(r*U) ) - (1//2) * (U/r) * Dr(H) )
+    eq_mom  = term_inertia - term_marangoni - term_capillary - term_extensional
+    eq_mass = Dt(H) + (1/r) * Dr( r * U * H )           # (1.3b)
+    eq_surf = Dt(G) + (1/r) * Dr( r * U * G )           # (1.3c)
+
+    pdes = [eq_mom, eq_mass, eq_surf]
+    indeps = [r, t]; deps = [U, H, G]
+
+    # Symmetry level (cheap, exact): once C and E terms are present the null space is 1-D,
+    # so η = r/t^(1/2) is the ONLY dilation symmetry of the full system.
+    null_vecs, _ = SimilaritySolver.find_dilation_symmetry(pdes, indeps, deps)
+    @test length(null_vecs) == 1
+    @test null_vecs[1] == [1//1, 2//1, -1//1, 0//1, -2//1]   # [a_r, a_t, c_u, c_h, c_Γ]
+
+    # Reduction level (slow path bypassed): reduce directly with pivot r.
+    # Exponents relative to a_r = 1: u ~ r^-1 ~ t^(-1/2), h ~ t^0, Γ ~ r^-2 ~ t^(-1) — Table 1.
+    cand = filter(c -> isequal(c.pivot, r),
+                  SimilaritySolver.build_similarity_candidates(null_vecs[1], nothing, indeps, deps))[1]
+    @test cand.gamma_vals == [-1//1, 0//1, -2//1]
+    @test occursin("1//2", string(cand.η_expr))
+    odes = SimilaritySolver.reduce_to_ode(pdes, indeps, deps, cand.η_expr, cand.pivot,
+                                          cand.pivot_idx, cand.gamma_vals, cand.alpha_norm)
+    @test odes !== nothing
+    @test length(odes) == 3
+end
