@@ -377,3 +377,33 @@ end
     nv_bad, _ = SimilaritySolver.find_dilation_symmetry(pdes, [x,t], [Q,V])
     @test length(nv_bad) == 1
 end
+
+@testset "build_invariance_system/nested_sums" begin
+    # Regression: terms hidden inside a derivative of a sum must still be inspected.
+    # Before flattening, `Dx(h*u^2 + P)` was ONE top-level node and the degree of the nested
+    # sum was read off its first summand, silently building the system from part of the equation.
+    @variables x t h(..) u(..) w(..) c
+    Dx = Differential(x); Dt = Differential(t)
+    H = h(x,t); U = u(x,t); W = w(x,t)
+
+    # Depth-averaged granular core, Deléage & Richard, JFM 1009 A57 (2025), eq (5.9),
+    # conservative part with Π = w h^3 + c h^2.
+    nested   = [Dt(H) + Dx(H*U),
+                Dt(H*U) + Dx(H*U^2 + W*H^3 + c*H^2),
+                Dt(H*W) + Dx(H*U*W)]
+    expanded = [Dt(H) + Dx(H*U),
+                Dt(H*U) + Dx(H*U^2) + Dx(W*H^3) + Dx(c*H^2),
+                Dt(H*W) + Dx(H*U*W)]
+
+    nv_n, _ = SimilaritySolver.find_dilation_symmetry(nested,   [x,t], [H,U,W])
+    nv_e, _ = SimilaritySolver.find_dilation_symmetry(expanded, [x,t], [H,U,W])
+    @test length(nv_n) == length(nv_e)          # writing style must not change the answer
+    @test length(nv_n) == 2
+
+    # Hand-derived: c_h = 2 c_u, c_w = -2 c_u, a_x - a_t = c_u.
+    A, pn = SimilaritySolver.build_invariance_system(nested, [x,t], [H,U,W])
+    @test pn == [:a_x, :a_t, :c_h, :c_u, :c_w]
+    for cu in (1//1, 2//1, -1//2)
+        @test all(abs.(A * Float64.([1//1, 1-cu, 2cu, cu, -2cu])) .< 1e-12)
+    end
+end

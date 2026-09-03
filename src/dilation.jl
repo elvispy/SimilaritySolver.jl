@@ -168,9 +168,27 @@ Return the top-level additive terms of `raw`.
 """
 function _collect_add_terms(raw)
     if SymbolicUtils.iscall(raw) && SymbolicUtils.operation(raw) === (+)
-        return SymbolicUtils.arguments(raw)
+        return mapreduce(_collect_add_terms, vcat, SymbolicUtils.arguments(raw))
     end
     return [raw]
+end
+
+"""
+    _flatten_pde(p) -> Num
+
+Push derivatives inside sums and distribute products, so that every additive term of the PDE
+appears at the top level. Without this, a term like `Dx(h*u^2 + P)` is a single top-level node
+and the scaling degree of the nested sum is read off its first summand only — silently building
+the invariance system from part of the equation.
+"""
+function _flatten_pde(p)
+    e = Symbolics.value(p)
+    e = Symbolics.expand_derivatives(e)   # D(a+b) -> D(a)+D(b)
+    return try
+        Symbolics.expand(e)               # distribute products over sums
+    catch
+        e
+    end
 end
 
 """
@@ -220,7 +238,7 @@ function build_invariance_system(pde, indep_vars::Vector, dep_vars::Vector; nonl
     A_rows = Vector{Vector{Float64}}()
 
     for p in pdes
-        raw   = Symbolics.unwrap(p)
+        raw   = Symbolics.unwrap(_flatten_pde(p))
         terms = _collect_add_terms(raw)
         degs  = [_scaling_degree_raw(t, indep_map, dep_map, nl) for t in terms]
         n_terms = length(degs)
