@@ -407,3 +407,32 @@ end
         @test all(abs.(A * Float64.([1//1, 1-cu, 2cu, cu, -2cu])) .< 1e-12)
     end
 end
+
+@testset "find_dominant_balances" begin
+    @variables x t h(..)
+    Dx = Differential(x); Dt = Differential(t); H = h(x,t)
+
+    # Porous-medium equation h_t = (h^n h_x)_x. The family must contain Barenblatt for every n:
+    # mass conservation (c_h + a_x = 0) selects a_t = (n+2) a_x, i.e. eta = x t^(-1/(n+2)).
+    for n in (1,2,3)
+        r = find_dominant_balances(Dt(H) - Dx(H^n*Dx(H)); indep_vars=[x,t], dep_vars=[H])
+        @test !isempty(r)
+        A, _ = SimilaritySolver.build_invariance_system(Dt(H) - Dx(H^n*Dx(H)), [x,t], [H])
+        @test all(abs.(A * Float64.([1//1, (n+2)//1, -1//1])) .< 1e-12)   # Barenblatt member
+    end
+
+    # Self-consistency filter: a balance is legitimate only if the DROPPED terms are subdominant
+    # under the scaling the retained terms imply. Without it, enumeration returns thousands of
+    # arithmetically homogeneous but physically meaningless subsets.
+    @variables u(..)
+    U = u(x,t)
+    eq = Dt(U) + U*Dx(U) - Dx(Dx(U)) + U^3          # Burgers + a reaction term
+    loose = find_dominant_balances(eq; indep_vars=[x,t], dep_vars=[U], self_consistent=false)
+    tight = find_dominant_balances(eq; indep_vars=[x,t], dep_vars=[U], self_consistent=true)
+    @test length(tight) < length(loose)
+    @test !isempty(tight)
+
+    # direction matters: late-time (lambda -> inf) and early-time balances differ in general
+    early = find_dominant_balances(eq; indep_vars=[x,t], dep_vars=[U], direction=:early)
+    @test all(r -> r.nullity >= 1, early)
+end

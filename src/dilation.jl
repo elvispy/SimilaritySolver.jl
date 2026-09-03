@@ -280,6 +280,118 @@ end
 
 
 # ---------------------------------------------------------------------------
+# Dominant-balance enumeration
+# ---------------------------------------------------------------------------
+
+"""
+    find_dominant_balances(pde; indep_vars, dep_vars, min_terms=2, keep=Int[],
+                           nonlocal_ops=Dict(), max_combos=200_000)
+
+Enumerate sub-balances of a PDE (or system) and return those that admit a dilation symmetry.
+
+A published model is usually *not* scale invariant as written — a closure pins a length. Physical
+similarity solutions live in an asymptotic regime where some terms are subdominant and drop out.
+Choosing which terms to drop is the dominant-balance step: routine, combinatorial (2^N per
+equation) and easy to get wrong by hand. This does it exhaustively.
+
+Returns a `Vector{NamedTuple}` sorted by richest balance first, each with
+- `terms`      — for each equation, the indices of the retained top-level terms
+- `expr`       — the retained sub-balance
+- `null_vecs`  — its dilation symmetries
+- `nullity`
+
+`min_terms` is the minimum number of terms kept per equation (a one-term "balance" is vacuous).
+`keep` optionally forces term indices to be retained in every equation (e.g. the time derivative).
+
+`self_consistent` (default `true`) applies the test that makes a dominant balance legitimate:
+every DROPPED term must actually be negligible under the scaling the retained terms imply.
+With `direction = :late` (λ → ∞, late-time/outer asymptotics) a dropped term survives the filter
+only if its scaling degree is strictly below the common degree of the retained terms;
+`direction = :early` (λ → 0, e.g. approach to a singularity) reverses the inequality.
+Without this test the enumeration returns thousands of arithmetically homogeneous but physically
+meaningless subsets.
+"""
+function find_dominant_balances(pde; indep_vars::Vector, dep_vars::Vector,
+                                min_terms::Int=2, keep::Vector{Int}=Int[],
+                                nonlocal_ops=Dict(), max_combos::Int=200_000,
+                                self_consistent::Bool=true, direction::Symbol=:late)
+    pdes = (pde isa AbstractVector) ? pde : [pde]
+    termsets = [ _collect_add_terms(Symbolics.unwrap(_flatten_pde(p))) for p in pdes ]
+
+    # per-equation candidate subsets
+    per_eq = Vector{Vector{Vector{Int}}}()
+    for ts in termsets
+        n = length(ts)
+        subsets = Vector{Int}[]
+        for mask in 1:(2^n - 1)
+            idx = [i for i in 1:n if (mask >> (i-1)) & 1 == 1]
+            length(idx) >= min(min_terms, n) || continue
+            all(k -> k in idx, filter(k -> k <= n, keep)) || continue
+            push!(subsets, idx)
+        end
+        isempty(subsets) && push!(subsets, collect(1:n))
+        push!(per_eq, subsets)
+    end
+    prod(length.(per_eq)) > max_combos &&
+        error("$(prod(length.(per_eq))) combinations exceeds max_combos=$max_combos; raise it or use `keep`")
+
+    out = NamedTuple[]
+    for combo in Iterators.product(per_eq...)
+        sub = [ sum(Symbolics.Num.(termsets[i][collect(combo[i])])) for i in eachindex(termsets) ]
+        nv, _ = try
+            find_dilation_symmetry(sub, indep_vars, dep_vars; nonlocal_ops=nonlocal_ops)
+        catch
+            (Vector{Rational{Int}}[], Symbol[])
+        end
+        isempty(nv) && continue
+        if self_consistent
+            ok = false
+            for v in nv
+                _balance_is_consistent(termsets, combo, v, indep_vars, dep_vars,
+                                       nonlocal_ops, direction) || continue
+                ok = true; break
+            end
+            ok || continue
+        end
+        push!(out, (terms=collect(combo), expr=sub, null_vecs=nv, nullity=length(nv)))
+    end
+    sort!(out; by = r -> -sum(length.(r.terms)))       # richest balance first
+    return out
+end
+
+"""
+    _balance_is_consistent(termsets, combo, v, indep_vars, dep_vars, nonlocal_ops, direction)
+
+True when every dropped term is strictly subdominant to the retained ones under the scaling `v`.
+"""
+function _balance_is_consistent(termsets, combo, v, indep_vars, dep_vars, nonlocal_ops, direction)
+    indep_map, dep_map = _make_maps(indep_vars, dep_vars)
+    nl = _resolve_nonlocal_ops(nonlocal_ops, indep_vars, indep_map)
+    pnames, _, _ = _param_names(indep_vars, dep_vars)
+    order = vcat([indep_map[begin_indep_name(x)] for x in indep_vars],
+                 [dep_map[begin_dep_name(u)] for u in dep_vars])
+    degof(t) = begin
+        d = _scaling_degree_raw(t, indep_map, dep_map, nl)
+        sum(Rational{Int}(get(d, order[j], 0//1)) * v[j] for j in eachindex(order))
+    end
+    for i in eachindex(termsets)
+        kept    = collect(combo[i])
+        dropped = setdiff(1:length(termsets[i]), kept)
+        isempty(dropped) && continue
+        Dk = degof(termsets[i][first(kept)])
+        for j in dropped
+            Dj = degof(termsets[i][j])
+            if direction === :late
+                Dj < Dk || return false
+            else
+                Dj > Dk || return false
+            end
+        end
+    end
+    return true
+end
+
+# ---------------------------------------------------------------------------
 # Find dilation symmetry (null space)
 # ---------------------------------------------------------------------------
 

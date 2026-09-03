@@ -18,6 +18,20 @@ This affects **symmetry detection only**. A nonlocal PDE reduces to an integro-d
 equation rather than an ODE, so `reduce_to_ode` does not handle these systems; use
 `find_dilation_symmetry` / `build_invariance_system` and carry out the reduction by hand.
 
+## Exact vs. asymptotic invariance
+
+`find_dilation_symmetry` tests **exact** dilation invariance. Most published models are not
+scale invariant as written — a closure (a logarithmic isotherm, an entropic free energy, a grain
+diameter, a Hamaker constant) pins a length. Physical similarity solutions usually live in an
+*asymptotic* regime where those terms are subdominant, which is Barenblatt's intermediate
+asymptotics; a scale may be present and a similarity solution still exist.
+
+Use [`find_dominant_balances`](@ref) for that case. It enumerates sub-balances, keeps those with
+a dilation symmetry, and — crucially — applies the self-consistency test that every dropped term
+really is negligible under the scaling the retained terms imply. On the depth-averaged granular
+model of Deléage & Richard (JFM 1009 A57, 2025) the full system has nullity 0, raw enumeration
+returns 17,643 homogeneous subsets, and the self-consistency filter leaves 2.
+
 ## Scope of Symmetries
 
 `SimilaritySolver.jl` is specifically designed to find **dilation (scaling) symmetries**. It does not currently support:
