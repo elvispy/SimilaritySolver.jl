@@ -332,3 +332,48 @@ end
     @test odes !== nothing
     @test length(odes) == 3
 end
+
+@testset "find_dilation_symmetry/nonlocal_operators" begin
+    # Fourier multipliers homogeneous of degree s (Hilbert transform s=0, Λ^α = |k|^α, s=α).
+    # Symmetry detection only: a nonlocal PDE reduces to an integro-differential equation,
+    # not an ODE, so `reduce_to_ode` is deliberately not exercised here.
+    @variables x t u(..) Λ(..)
+    Dt = Differential(t)
+    frac = Dt(u(x,t)) + Λ(u(x,t))
+
+    # u_t = -Λ^α u  =>  a_t = α a_x, i.e. η = x / t^(1/α). α=2 recovers the heat equation.
+    for α in (1//1, 3//2, 2//1)
+        nv, pn = SimilaritySolver.find_dilation_symmetry(frac, [x,t], [u(x,t)];
+                                                         nonlocal_ops = Dict(:Λ => α))
+        @test pn == [:a_x, :a_t, :c_u]
+        # the physical member has c_u = 0 and a_t/a_x = α
+        phys = [1//1, α, 0//1]
+        A, _ = SimilaritySolver.build_invariance_system(frac, [x,t], [u(x,t)];
+                                                        nonlocal_ops = Dict(:Λ => α))
+        @test all(abs.(A * Float64.(phys)) .< 1e-12)
+        @test length(nv) == 2
+    end
+
+    # Local reduced model of leaky-dielectric equatorial charge blowup, derived from
+    # Peng, Brandão, Yariv & Schnitzer, Phys. Rev. Fluids 9, 083701 (2024), §IV:
+    #   q_t + (q u)_x = 0 ,  u_x = (3/4)( q^2 - (Hq)^2 ).
+    # H is the Hilbert transform (degree 0). Invariance leaves a ONE-PARAMETER family
+    # [a_x,a_t,c_q,c_u] = [1, -2c, c, 1+2c]: self-similarity of the second kind.
+    @variables q(..) v(..) H(..)
+    Dx = Differential(x)
+    Q = q(x,t); V = v(x,t)
+    pdes = [Dt(Q) + Dx(Q*V), Dx(V) - (3//4)*Q^2 + (3//4)*H(Q)^2]
+
+    A, _  = SimilaritySolver.build_invariance_system(pdes, [x,t], [Q,V];
+                                                     nonlocal_ops = Dict(:H => 0//1))
+    nv, _ = SimilaritySolver.find_dilation_symmetry(pdes, [x,t], [Q,V];
+                                                    nonlocal_ops = Dict(:H => 0//1))
+    @test length(nv) == 2
+    for c in (0//1, 1//1, -1//2, 3//1, 7//3)
+        @test all(abs.(A * Float64.([1//1, -2c, c, 1+2c])) .< 1e-12)
+    end
+
+    # Without declaring H the operator is treated as inert and the family collapses (nullity 1):
+    nv_bad, _ = SimilaritySolver.find_dilation_symmetry(pdes, [x,t], [Q,V])
+    @test length(nv_bad) == 1
+end

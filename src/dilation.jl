@@ -53,11 +53,16 @@ function _param_names(indep_vars, dep_vars)
 end
 
 """
-    _scaling_degree_raw(raw, indep_map, dep_map) -> ScalingDegree
+    _scaling_degree_raw(raw, indep_map, dep_map, nonlocal_ops) -> ScalingDegree
 
 Recursively compute the ε-scaling degree of a raw SymbolicUtils expression.
+
+`nonlocal_ops` is the *resolved* form `opname => (scaling_param => s)`: applying the operator
+subtracts `s` from the scaling degree of the named independent variable. See
+[`build_invariance_system`](@ref) for the user-facing form.
 """
-function _scaling_degree_raw(raw, indep_map::Dict{Symbol,Symbol}, dep_map::Dict{Symbol,Symbol})
+function _scaling_degree_raw(raw, indep_map::Dict{Symbol,Symbol}, dep_map::Dict{Symbol,Symbol},
+                             nonlocal_ops::Dict{Symbol,Pair{Symbol,Rational{Int}}}=Dict{Symbol,Pair{Symbol,Rational{Int}}}())
     # --- concrete numbers ---
     raw isa Number && return _zero_degree()
 
@@ -77,7 +82,7 @@ function _scaling_degree_raw(raw, indep_map::Dict{Symbol,Symbol}, dep_map::Dict{
 
     # --- Differential(xᵢ)(inner) ---
     if op isa Differential
-        inner_deg = _scaling_degree_raw(args[1], indep_map, dep_map)
+        inner_deg = _scaling_degree_raw(args[1], indep_map, dep_map, nonlocal_ops)
         dx_raw = Symbolics.unwrap(op.x)
         dx_nm  = SymbolicUtils.issym(dx_raw) ? dx_raw.name : nothing
         if dx_nm !== nothing && haskey(indep_map, dx_nm)
@@ -86,6 +91,17 @@ function _scaling_degree_raw(raw, indep_map::Dict{Symbol,Symbol}, dep_map::Dict{
             return _add_degrees(inner_deg, ScalingDegree(indep_map[dx_nm] => -Rational{Int}(ord)))
         end
         return inner_deg
+    end
+
+    # --- Nonlocal operator of fixed homogeneity: H(u), Λ(u), … ---
+    # A Fourier multiplier homogeneous of degree s scales the degree of its argument by +s.
+    # (The +s is a constant shift, so it cancels out of the term-difference rows and only
+    #  matters when operators of different homogeneity appear in the same PDE.)
+    if SymbolicUtils.issym(op) && haskey(nonlocal_ops, op.name)
+        inner = _scaling_degree_raw(args[1], indep_map, dep_map, nonlocal_ops)
+        aparam, s_deg = nonlocal_ops[op.name]
+        # a multiplier |k|^s dual to x scales as λ^{-s} when x → λx
+        return iszero(s_deg) ? inner : _add_degrees(inner, ScalingDegree(aparam => -s_deg))
     end
 
     # --- Dependent variable call: u(x, t) ---
@@ -99,7 +115,7 @@ function _scaling_degree_raw(raw, indep_map::Dict{Symbol,Symbol}, dep_map::Dict{
 
     # --- Addition ---
     if op === (+)
-        degrees = [_scaling_degree_raw(a, indep_map, dep_map) for a in args]
+        degrees = [_scaling_degree_raw(a, indep_map, dep_map, nonlocal_ops) for a in args]
         non_zero = filter(d -> !isempty(d), degrees)
         isempty(non_zero) && return _zero_degree()
         return first(non_zero)
@@ -108,7 +124,7 @@ function _scaling_degree_raw(raw, indep_map::Dict{Symbol,Symbol}, dep_map::Dict{
     # --- Multiplication ---
     if op === (*)
         return reduce(_add_degrees,
-                      [_scaling_degree_raw(a, indep_map, dep_map) for a in args];
+                      [_scaling_degree_raw(a, indep_map, dep_map, nonlocal_ops) for a in args];
                       init=_zero_degree())
     end
 
@@ -126,13 +142,13 @@ function _scaling_degree_raw(raw, indep_map::Dict{Symbol,Symbol}, dep_map::Dict{
         
         (isnothing(exp_val) || !isfinite(Float64(exp_val))) && return _zero_degree()
         exp_rat = rationalize(Int, Float64(exp_val); tol=1e-9)
-        return _scale_degree(_scaling_degree_raw(base_raw, indep_map, dep_map), exp_rat)
+        return _scale_degree(_scaling_degree_raw(base_raw, indep_map, dep_map, nonlocal_ops), exp_rat)
     end
 
     # --- Division ---
     if op === (/)
-        num_deg = _scaling_degree_raw(args[1], indep_map, dep_map)
-        den_deg = _scaling_degree_raw(args[2], indep_map, dep_map)
+        num_deg = _scaling_degree_raw(args[1], indep_map, dep_map, nonlocal_ops)
+        den_deg = _scaling_degree_raw(args[2], indep_map, dep_map, nonlocal_ops)
         return _add_degrees(num_deg, _neg_degree(den_deg))
     end
 
@@ -158,15 +174,42 @@ function _collect_add_terms(raw)
 end
 
 """
-    build_invariance_system(pde, indep_vars, dep_vars)
+    _resolve_nonlocal_ops(spec, indep_vars, indep_map)
+
+Normalise the user-facing `nonlocal_ops` spec into `opname => (scaling_param => degree)`.
+
+Accepted entries:
+- `:H => 0` — degree-0 (scale-invariant) operator such as the Hilbert transform. The variable
+  is immaterial, so the first independent variable is used.
+- `:Λ => (:x => 1)` — a multiplier `|k|^s` with `k` dual to the named variable.
+- `:Λ => 1` — shorthand for `(:x => 1)` with `x` the *first* independent variable.
+"""
+function _resolve_nonlocal_ops(spec, indep_vars::Vector, indep_map::Dict{Symbol,Symbol})
+    out = Dict{Symbol,Pair{Symbol,Rational{Int}}}()
+    isempty(spec) && return out
+    default_var = begin_indep_name(first(indep_vars))
+    for (name, val) in spec
+        var, deg = val isa Pair ? (val.first, val.second) : (default_var, val)
+        haskey(indep_map, var) || error("nonlocal_ops: `$name` refers to unknown independent variable `$var`")
+        out[Symbol(name)] = indep_map[var] => Rational{Int}(deg)
+    end
+    return out
+end
+
+"""
+    build_invariance_system(pde, indep_vars, dep_vars; nonlocal_ops=Dict())
     -> (A::Matrix{Float64}, param_names::Vector{Symbol})
 
 Matrix A of size (n_terms-1, n_params). Its null space gives the valid
 dilation exponents. Columns are ordered as [a_x1, …, a_xn, c_u1, …, c_um].
+
+`nonlocal_ops` declares Fourier multipliers of fixed homogeneity so that nonlocal PDEs
+(Hilbert transform, fractional Laplacian) are handled; see [`_resolve_nonlocal_ops`](@ref).
 """
-function build_invariance_system(pde, indep_vars::Vector, dep_vars::Vector)
+function build_invariance_system(pde, indep_vars::Vector, dep_vars::Vector; nonlocal_ops=Dict())
     pdes = (pde isa AbstractVector) ? pde : [pde]
     indep_map, dep_map = _make_maps(indep_vars, dep_vars)
+    nl = _resolve_nonlocal_ops(nonlocal_ops, indep_vars, indep_map)
     # Free symbols that are neither indep nor dep vars (physical parameters) get
     # zero scaling degree automatically in _scaling_degree_raw.
     # stable column ordering
@@ -179,7 +222,7 @@ function build_invariance_system(pde, indep_vars::Vector, dep_vars::Vector)
     for p in pdes
         raw   = Symbolics.unwrap(p)
         terms = _collect_add_terms(raw)
-        degs  = [_scaling_degree_raw(t, indep_map, dep_map) for t in terms]
+        degs  = [_scaling_degree_raw(t, indep_map, dep_map, nl) for t in terms]
         n_terms = length(degs)
         n_terms <= 1 && continue
 
@@ -229,8 +272,8 @@ end
 Return null-space vectors of the invariance system as rational vectors,
 computed exactly via Gaussian elimination over ℚ.
 """
-function find_dilation_symmetry(pde, indep_vars::Vector, dep_vars::Vector)
-    A, param_names = build_invariance_system(pde, indep_vars, dep_vars)
+function find_dilation_symmetry(pde, indep_vars::Vector, dep_vars::Vector; nonlocal_ops=Dict())
+    A, param_names = build_invariance_system(pde, indep_vars, dep_vars; nonlocal_ops=nonlocal_ops)
     n = length(param_names)
 
     if size(A, 1) == 0
@@ -719,8 +762,8 @@ Returns a `Vector{Dict{String,Any}}`. Each Dict has keys:
 - `"gamma_vals"` — `Vector{Rational}` of scaling exponents, one per dep_var
 - `"gamma"` — scalar shorthand for `gamma_vals[1]` (backward compat; single dep_var)
 """
-function find_ode_dilation(pde; indep_vars::Vector, dep_vars::Vector, verbose::Bool=false)
-    null_vecs, param_names = find_dilation_symmetry(pde, indep_vars, dep_vars)
+function find_ode_dilation(pde; indep_vars::Vector, dep_vars::Vector, nonlocal_ops=Dict(), verbose::Bool=false)
+    null_vecs, param_names = find_dilation_symmetry(pde, indep_vars, dep_vars; nonlocal_ops=nonlocal_ops)
 
     # Expand with integer linear combinations so physically relevant similarity
     # variables not aligned with a basis vector are also found (Phase 2.5).
